@@ -3,14 +3,30 @@ import time
 import requests
 from bs4 import BeautifulSoup
 from openai import OpenAI
+import streamlit as st
 
-# Initialize OpenAI client
-client = OpenAI(api_key=os.environ.get("OPENAI_API_KEY"))
+# Safe client initialization (checks Streamlit secrets first, then OS env)
+api_key = st.secrets.get("OPENAI_API_KEY", os.environ.get("OPENAI_API_KEY"))
+client = OpenAI(api_key=api_key)
+
+BLOCKED_TARGETS = ["localhost", "127.0.0.1", "169.254.169.254", "0.0.0.0"]
 
 
-def audit_website(url):
+def audit_website(url: str) -> dict:
     if not url.startswith("http://") and not url.startswith("https://"):
         url = "https://" + url
+
+    # SSRF Protection
+    for blocked in BLOCKED_TARGETS:
+        if blocked in url.lower():
+            return {
+                "url": url,
+                "is_https": False,
+                "load_time_sec": None,
+                "has_mobile_viewport": False,
+                "title": "Blocked URL",
+                "status": "Failed: Invalid or restricted address",
+            }
 
     headers = {
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
@@ -27,15 +43,30 @@ def audit_website(url):
 
     try:
         start_time = time.time()
-        response = requests.get(url, headers=headers, timeout=10)
+        # Stream response to inspect headers without pulling massive payloads
+        response = requests.get(url, headers=headers, timeout=10, stream=True)
         report["load_time_sec"] = round(time.time() - start_time, 2)
+
+        content_type = response.headers.get("Content-Type", "").lower()
+        if "text/html" not in content_type:
+            report["status"] = "Skipped: Target is not an HTML page"
+            return report
 
         if response.status_code != 200:
             report["status"] = f"Failed with status code {response.status_code}"
             return report
 
-        soup = BeautifulSoup(response.text, "html.parser")
-        report["title"] = soup.title.string.strip() if soup.title else "No title found"
+        # Read only up to 500KB to protect RAM
+        content = next(response.iter_content(512 * 1024)).decode(
+            "utf-8", errors="ignore"
+        )
+        soup = BeautifulSoup(content, "html.parser")
+
+        # Safe title extraction
+        if soup.title and soup.title.get_text(strip=True):
+            report["title"] = soup.title.get_text(strip=True)[:80]
+        else:
+            report["title"] = "No title found"
 
         viewport = soup.find("meta", attrs={"name": "viewport"})
         if viewport:
@@ -54,9 +85,9 @@ def audit_website(url):
     return report
 
 
-def generate_pitch(audit_data):
-    if "Failed" in audit_data["status"]:
-        return "Could not generate pitch: Site unreachable."
+def generate_pitch(audit_data: dict) -> str:
+    if "Failed" in audit_data["status"] or "Skipped" in audit_data["status"]:
+        return "Could not generate pitch: Target site is invalid or unreachable."
 
     flaws = []
     if not audit_data["is_https"]:
@@ -94,31 +125,16 @@ def generate_pitch(audit_data):
     Write the 3-sentence note.
     """
 
-    response = client.chat.completions.create(
-        model="gpt-4o-mini",
-        messages=[
-            {"role": "system", "content": system_prompt},
-            {"role": "user", "content": user_prompt},
-        ],
-        max_tokens=90,
-        temperature=0.5,
-    )
-
-    return response.choices[0].message.content.strip()
-
-
-def main():
-    target = input("Enter website URL: ").strip()
-    results = audit_website(target)
-
-    print("\n--- Audit Results ---")
-    for key, value in results.items():
-        print(f"{key}: {value}")
-
-    print("\n--- Generated Pitch ---")
-    pitch = generate_pitch(results)
-    print(pitch)
-
-
-if __name__ == "__main__":
-    main()
+    try:
+        response = client.chat.completions.create(
+            model="gpt-4o-mini",
+            messages=[
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": user_prompt},
+            ],
+            max_tokens=90,
+            temperature=0.5,
+        )
+        return response.choices[0].message.content.strip()
+    except Exception as e:
+        return f"Pitch generation temporarily unavailable: {e}"
