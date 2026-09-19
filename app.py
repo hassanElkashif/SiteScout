@@ -41,7 +41,6 @@ def increment_audits(key: str, count: int) -> int:
 
 
 # License Key Validation
-# Lemon Squeezy License Validation (Production Grade)
 def verify_lemon_license(license_key: str) -> tuple[bool, str]:
     key = license_key.strip()
     if not key:
@@ -49,7 +48,7 @@ def verify_lemon_license(license_key: str) -> tuple[bool, str]:
     if key == "ADMIN-TEST-PASS":
         return True, "Admin bypass granted."
 
-    url = "https://api.lemonsqueezy.com/v1/licenses/validate"
+    url = "[https://api.lemonsqueezy.com/v1/licenses/validate](https://api.lemonsqueezy.com/v1/licenses/validate)"
     headers = {"Accept": "application/json"}
     payload = {"license_key": key}
 
@@ -60,16 +59,9 @@ def verify_lemon_license(license_key: str) -> tuple[bool, str]:
         if not data.get("valid"):
             return False, data.get("error", "Invalid or inactive license key.")
 
-        # Ensure license is active and not refunded/disabled
         status = data.get("license_key", {}).get("status")
         if status not in ["active", "inactive"]:
             return False, f"License is {status}."
-
-        # Verify product matches SiteScout (prevent cross-store key reuse)
-        # Uncomment and add your Product ID once obtained from Lemon Squeezy:
-        # EXPECTED_PRODUCT_ID = 123456
-        # if data.get("meta", {}).get("product_id") != EXPECTED_PRODUCT_ID:
-        #     return False, "This license belongs to another product."
 
         return True, "License verified successfully."
     except Exception as e:
@@ -109,7 +101,6 @@ if not st.session_state.get("authenticated", False):
     )
     st.stop()
 
-# Display Remaining Limit in Sidebar
 # Sidebar Metric Placeholder
 current_key = st.session_state.get("license_key", "")
 used_count = get_audits_used(current_key)
@@ -127,7 +118,11 @@ urls_input = st.text_area(
 )
 
 if st.button("Run Batch Audit", type="primary"):
-    raw_urls = [line.strip() for line in urls_input.splitlines() if line.strip()]
+    raw_urls = list(
+        dict.fromkeys(
+            [line.strip() for line in urls_input.splitlines() if line.strip()]
+        )
+    )
 
     if not raw_urls:
         st.warning("Please enter at least one URL.")
