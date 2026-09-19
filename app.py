@@ -118,11 +118,19 @@ urls_input = st.text_area(
 )
 
 if st.button("Run Batch Audit", type="primary"):
-    raw_urls = list(
-        dict.fromkeys(
-            [line.strip() for line in urls_input.splitlines() if line.strip()]
+    # Normalize to lowercase and strip protocol/slashes for accurate deduplication
+    seen = set()
+    raw_urls = []
+    for line in urls_input.splitlines():
+        cleaned = line.strip()
+        if not cleaned:
+            continue
+        normalized = (
+            cleaned.lower().replace("https://", "").replace("http://", "").rstrip("/")
         )
-    )
+        if normalized not in seen:
+            seen.add(normalized)
+            raw_urls.append(cleaned)
 
     if not raw_urls:
         st.warning("Please enter at least one URL.")
@@ -175,7 +183,7 @@ if st.button("Run Batch Audit", type="primary"):
 # Display Persistent Results
 if "last_results" in st.session_state:
     st.subheader("Audit Results")
-    for row in st.session_state["last_results"]:
+    for idx, row in enumerate(st.session_state["last_results"]):
         with st.expander(f"{row['URL']} - {row['Status']}", expanded=True):
             c1, c2, c3 = st.columns(3)
             c1.metric("Load Time", f"{row['Load Time (s)']}")
@@ -185,7 +193,7 @@ if "last_results" in st.session_state:
                 "Cold Pitch",
                 value=row["Generated Pitch"],
                 height=90,
-                key=f"pitch_{row['URL']}",
+                key=f"pitch_{idx}_{row['URL']}",
             )
 
     csv_buffer = io.StringIO()

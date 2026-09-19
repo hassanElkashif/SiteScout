@@ -73,13 +73,16 @@ def audit_website(url: str) -> dict:
 
     except requests.exceptions.SSLError:
         report["is_https"] = False
-        report["status"] = "SSL certificate invalid or missing"
+        report["status"] = "Failed: SSL certificate invalid or missing"
     except requests.exceptions.Timeout:
-        report["status"] = "Connection timed out"
+        report["is_https"] = False
+        report["status"] = "Failed: Connection timed out"
     except requests.exceptions.ConnectionError:
-        report["status"] = "Host unreachable or connection refused"
+        report["is_https"] = False
+        report["status"] = "Failed: Host unreachable or connection refused"
     except requests.exceptions.RequestException:
-        report["status"] = "Connection failed"
+        report["is_https"] = False
+        report["status"] = "Failed: Connection failed"
 
     return report
 
