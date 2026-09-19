@@ -1,37 +1,55 @@
 import streamlit as st
 import csv
 import io
-from scout import audit_website, generate_pitch
 import requests
+from scout import audit_website, generate_pitch
+
+AUDIT_LIMIT = 400
+MAX_BATCH_SIZE = 20
 
 st.set_page_config(page_title="SiteScout", layout="wide")
-
 st.title("SiteScout")
 st.caption(
     "Batch audit business websites and generate personalized cold outreach pitches."
 )
 
-# Multi-line input for bulk URLs
-urls_input = st.text_area(
-    "Target Website URLs (one per line)",
-    placeholder="berkshirehathaway.com\nstripe.com\nexample.com",
-    height=140,
-)
+
+# Upstash Quota Tracking
+def get_audits_used(key: str) -> int:
+    if key == "ADMIN-TEST-PASS":
+        return 0
+    try:
+        url = f"{st.secrets['UPSTASH_URL']}/get/{key}"
+        headers = {"Authorization": f"Bearer {st.secrets['UPSTASH_TOKEN']}"}
+        r = requests.get(url, headers=headers, timeout=5).json()
+        val = r.get("result")
+        return int(val) if val is not None else 0
+    except Exception:
+        return 0
 
 
+def increment_audits(key: str, count: int) -> int:
+    if key == "ADMIN-TEST-PASS":
+        return 0
+    try:
+        url = f"{st.secrets['UPSTASH_URL']}/incrby/{key}/{count}"
+        headers = {"Authorization": f"Bearer {st.secrets['UPSTASH_TOKEN']}"}
+        r = requests.get(url, headers=headers, timeout=5).json()
+        return int(r.get("result", 0))
+    except Exception:
+        return 0
+
+
+# License Key Validation
 def verify_lemon_license(license_key: str) -> tuple[bool, str]:
     key = license_key.strip()
     if not key:
         return False, "Please enter a license key."
-
     if key == "ADMIN-TEST-PASS":
         return True, "Admin bypass granted."
 
     url = "https://api.lemonsqueezy.com/v1/licenses/activate"
-    payload = {
-        "license_key": key,
-        "instance_name": "Streamlit Client",
-    }
+    payload = {"license_key": key, "instance_name": "Streamlit Client"}
     headers = {"Accept": "application/json"}
 
     try:
@@ -44,19 +62,32 @@ def verify_lemon_license(license_key: str) -> tuple[bool, str]:
         return False, f"Verification failed: {e}"
 
 
-# Sidebar Access Control
+# Sidebar Authentication
 st.sidebar.title("Account")
-license_key = st.sidebar.text_input("Enter License Key", type="password")
+input_key = st.sidebar.text_input("Enter License Key", type="password")
 
-if st.sidebar.button("Verify License"):
-    valid, msg = verify_lemon_license(license_key)
+# URL Query Param Auto-Login
+params = st.query_params
+if "key" in params and not st.session_state.get("authenticated", False):
+    valid, msg = verify_lemon_license(params["key"])
     if valid:
         st.session_state["authenticated"] = True
+        st.session_state["license_key"] = params["key"].strip()
+
+# Manual Verification
+if st.sidebar.button("Verify License"):
+    valid, msg = verify_lemon_license(input_key)
+    if valid:
+        st.session_state["authenticated"] = True
+        st.session_state["license_key"] = input_key.strip()
+        st.query_params["key"] = input_key.strip()
         st.sidebar.success(msg)
     else:
         st.session_state["authenticated"] = False
+        st.session_state["license_key"] = ""
         st.sidebar.error(msg)
 
+# Gate Unauthenticated Users
 if not st.session_state.get("authenticated", False):
     st.info("Please enter a valid license key in the sidebar to use SiteScout.")
     st.markdown(
@@ -64,12 +95,32 @@ if not st.session_state.get("authenticated", False):
     )
     st.stop()
 
+# Display Remaining Limit in Sidebar
+current_key = st.session_state.get("license_key", "")
+used_count = get_audits_used(current_key)
+remaining = max(0, AUDIT_LIMIT - used_count)
+
+st.sidebar.divider()
+st.sidebar.metric("Audits Remaining", f"{remaining} / {AUDIT_LIMIT}")
+
+# Audit Form Execution
+urls_input = st.text_area(
+    "Target Website URLs (one per line)",
+    placeholder="berkshirehathaway.com\nstripe.com\nexample.com",
+    height=140,
+)
 
 if st.button("Run Batch Audit", type="primary"):
     raw_urls = [line.strip() for line in urls_input.splitlines() if line.strip()]
 
     if not raw_urls:
         st.warning("Please enter at least one URL.")
+    elif len(raw_urls) > MAX_BATCH_SIZE:
+        st.error(f"Batch limit exceeded. Max {MAX_BATCH_SIZE} URLs per run.")
+    elif len(raw_urls) > remaining:
+        st.error(
+            f"Quota exceeded. You only have {remaining} audits remaining on your license."
+        )
     else:
         results = []
         progress_bar = st.progress(0)
@@ -77,13 +128,13 @@ if st.button("Run Batch Audit", type="primary"):
 
         for idx, url in enumerate(raw_urls):
             status_text.text(f"Auditing {idx + 1}/{len(raw_urls)}: {url}")
-
             audit_data = audit_website(url)
 
-            if "Failed" in audit_data["status"]:
-                pitch = "N/A - Site unreachable"
-            else:
-                pitch = generate_pitch(audit_data)
+            pitch = (
+                "N/A - Site unreachable"
+                if "Failed" in audit_data["status"]
+                else generate_pitch(audit_data)
+            )
 
             results.append(
                 {
@@ -98,22 +149,21 @@ if st.button("Run Batch Audit", type="primary"):
                     "Generated Pitch": pitch,
                 }
             )
-
             progress_bar.progress((idx + 1) / len(raw_urls))
+
+        # Atomic increment in database
+        increment_audits(current_key, len(raw_urls))
 
         status_text.empty()
         progress_bar.empty()
 
         st.subheader("Audit Results")
-
-        # Display results in cards
         for row in results:
             with st.expander(f"{row['URL']} - {row['Status']}", expanded=True):
-                col1, col2, col3 = st.columns(3)
-                col1.metric("Load Time", f"{row['Load Time (s)']}")
-                col2.metric("SSL Secure", row["SSL Secure"])
-                col3.metric("Mobile Ready", row["Mobile Ready"])
-
+                c1, c2, c3 = st.columns(3)
+                c1.metric("Load Time", f"{row['Load Time (s)']}")
+                c2.metric("SSL Secure", row["SSL Secure"])
+                c3.metric("Mobile Ready", row["Mobile Ready"])
                 st.text_area(
                     "Cold Pitch",
                     value=row["Generated Pitch"],
@@ -121,7 +171,6 @@ if st.button("Run Batch Audit", type="primary"):
                     key=f"pitch_{row['URL']}",
                 )
 
-        # CSV Export Generator
         csv_buffer = io.StringIO()
         fieldnames = [
             "URL",
@@ -142,3 +191,4 @@ if st.button("Run Batch Audit", type="primary"):
             file_name="sitescout_leads.csv",
             mime="text/csv",
         )
+        st.rerun()
