@@ -41,6 +41,7 @@ def increment_audits(key: str, count: int) -> int:
 
 
 # License Key Validation
+# Lemon Squeezy License Validation (Production Grade)
 def verify_lemon_license(license_key: str) -> tuple[bool, str]:
     key = license_key.strip()
     if not key:
@@ -48,18 +49,31 @@ def verify_lemon_license(license_key: str) -> tuple[bool, str]:
     if key == "ADMIN-TEST-PASS":
         return True, "Admin bypass granted."
 
-    url = "https://api.lemonsqueezy.com/v1/licenses/activate"
-    payload = {"license_key": key, "instance_name": "Streamlit Client"}
+    url = "https://api.lemonsqueezy.com/v1/licenses/validate"
     headers = {"Accept": "application/json"}
+    payload = {"license_key": key}
 
     try:
         response = requests.post(url, data=payload, headers=headers, timeout=10)
         data = response.json()
-        if data.get("activated"):
-            return True, "License activated successfully."
-        return False, data.get("error", "Invalid license key.")
+
+        if not data.get("valid"):
+            return False, data.get("error", "Invalid or inactive license key.")
+
+        # Ensure license is active and not refunded/disabled
+        status = data.get("license_key", {}).get("status")
+        if status not in ["active", "inactive"]:
+            return False, f"License is {status}."
+
+        # Verify product matches SiteScout (prevent cross-store key reuse)
+        # Uncomment and add your Product ID once obtained from Lemon Squeezy:
+        # EXPECTED_PRODUCT_ID = 123456
+        # if data.get("meta", {}).get("product_id") != EXPECTED_PRODUCT_ID:
+        #     return False, "This license belongs to another product."
+
+        return True, "License verified successfully."
     except Exception as e:
-        return False, f"Verification failed: {e}"
+        return False, f"Verification service unavailable: {e}"
 
 
 # Sidebar Authentication
@@ -96,14 +110,16 @@ if not st.session_state.get("authenticated", False):
     st.stop()
 
 # Display Remaining Limit in Sidebar
+# Sidebar Metric Placeholder
 current_key = st.session_state.get("license_key", "")
 used_count = get_audits_used(current_key)
 remaining = max(0, AUDIT_LIMIT - used_count)
 
 st.sidebar.divider()
-st.sidebar.metric("Audits Remaining", f"{remaining} / {AUDIT_LIMIT}")
+quota_display = st.sidebar.empty()
+quota_display.metric("Audits Remaining", f"{remaining} / {AUDIT_LIMIT}")
 
-# Audit Form Execution
+# Main Input
 urls_input = st.text_area(
     "Target Website URLs (one per line)",
     placeholder="berkshirehathaway.com\nstripe.com\nexample.com",
@@ -151,44 +167,49 @@ if st.button("Run Batch Audit", type="primary"):
             )
             progress_bar.progress((idx + 1) / len(raw_urls))
 
-        # Atomic increment in database
-        increment_audits(current_key, len(raw_urls))
+        # Save to database and update state
+        new_total = increment_audits(current_key, len(raw_urls))
+        new_remaining = max(0, AUDIT_LIMIT - new_total)
+        quota_display.metric("Audits Remaining", f"{new_remaining} / {AUDIT_LIMIT}")
 
         status_text.empty()
         progress_bar.empty()
 
-        st.subheader("Audit Results")
-        for row in results:
-            with st.expander(f"{row['URL']} - {row['Status']}", expanded=True):
-                c1, c2, c3 = st.columns(3)
-                c1.metric("Load Time", f"{row['Load Time (s)']}")
-                c2.metric("SSL Secure", row["SSL Secure"])
-                c3.metric("Mobile Ready", row["Mobile Ready"])
-                st.text_area(
-                    "Cold Pitch",
-                    value=row["Generated Pitch"],
-                    height=90,
-                    key=f"pitch_{row['URL']}",
-                )
+        st.session_state["last_results"] = results
 
-        csv_buffer = io.StringIO()
-        fieldnames = [
-            "URL",
-            "Title",
-            "Load Time (s)",
-            "SSL Secure",
-            "Mobile Ready",
-            "Status",
-            "Generated Pitch",
-        ]
-        writer = csv.DictWriter(csv_buffer, fieldnames=fieldnames)
-        writer.writeheader()
-        writer.writerows(results)
+# Display Persistent Results
+if "last_results" in st.session_state:
+    st.subheader("Audit Results")
+    for row in st.session_state["last_results"]:
+        with st.expander(f"{row['URL']} - {row['Status']}", expanded=True):
+            c1, c2, c3 = st.columns(3)
+            c1.metric("Load Time", f"{row['Load Time (s)']}")
+            c2.metric("SSL Secure", row["SSL Secure"])
+            c3.metric("Mobile Ready", row["Mobile Ready"])
+            st.text_area(
+                "Cold Pitch",
+                value=row["Generated Pitch"],
+                height=90,
+                key=f"pitch_{row['URL']}",
+            )
 
-        st.download_button(
-            label="Download Results as CSV",
-            data=csv_buffer.getvalue(),
-            file_name="sitescout_leads.csv",
-            mime="text/csv",
-        )
-        st.rerun()
+    csv_buffer = io.StringIO()
+    fieldnames = [
+        "URL",
+        "Title",
+        "Load Time (s)",
+        "SSL Secure",
+        "Mobile Ready",
+        "Status",
+        "Generated Pitch",
+    ]
+    writer = csv.DictWriter(csv_buffer, fieldnames=fieldnames)
+    writer.writeheader()
+    writer.writerows(st.session_state["last_results"])
+
+    st.download_button(
+        label="Download Results as CSV",
+        data=csv_buffer.getvalue(),
+        file_name="sitescout_leads.csv",
+        mime="text/csv",
+    )
