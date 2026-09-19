@@ -57,9 +57,8 @@ def audit_website(url: str) -> dict:
             return report
 
         # Read only up to 500KB to protect RAM
-        content = next(response.iter_content(512 * 1024)).decode(
-            "utf-8", errors="ignore"
-        )
+        chunk = next(response.iter_content(512 * 1024), b"")
+        content = chunk.decode("utf-8", errors="ignore")
         soup = BeautifulSoup(content, "html.parser")
 
         # Safe title extraction

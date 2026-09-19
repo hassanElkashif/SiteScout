@@ -48,7 +48,7 @@ def verify_lemon_license(license_key: str) -> tuple[bool, str]:
     if key == "ADMIN-TEST-PASS":
         return True, "Admin bypass granted."
 
-    url = "[https://api.lemonsqueezy.com/v1/licenses/validate](https://api.lemonsqueezy.com/v1/licenses/validate)"
+    url = "https://api.lemonsqueezy.com/v1/licenses/validate"
     headers = {"Accept": "application/json"}
     payload = {"license_key": key}
 
