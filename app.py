@@ -1,6 +1,9 @@
 import streamlit as st
 import csv
 import io
+import re
+from urllib.parse import quote
+from concurrent.futures import ThreadPoolExecutor, as_completed
 import requests
 from scout import audit_website, generate_pitch
 
@@ -14,12 +17,19 @@ st.caption(
 )
 
 
-# Upstash Quota Tracking
+def is_valid_key_format(key: str) -> bool:
+    """Ensures the key only contains valid alphanumeric and hyphen characters."""
+    return bool(re.match(r"^[a-zA-Z0-9\-]{8,64}$", key.strip()))
+
+
+# Upstash Quota Tracking (with path sanitization)
 def get_audits_used(key: str) -> int:
-    if key == "ADMIN-TEST-PASS":
+    clean_key = key.strip()
+    if not is_valid_key_format(clean_key):
         return 0
     try:
-        url = f"{st.secrets['UPSTASH_URL']}/get/{key}"
+        safe_key = quote(clean_key, safe="")
+        url = f"{st.secrets['UPSTASH_URL']}/get/{safe_key}"
         headers = {"Authorization": f"Bearer {st.secrets['UPSTASH_TOKEN']}"}
         r = requests.get(url, headers=headers, timeout=5).json()
         val = r.get("result")
@@ -29,10 +39,12 @@ def get_audits_used(key: str) -> int:
 
 
 def increment_audits(key: str, count: int) -> int:
-    if key == "ADMIN-TEST-PASS":
+    clean_key = key.strip()
+    if not is_valid_key_format(clean_key) or count <= 0:
         return 0
     try:
-        url = f"{st.secrets['UPSTASH_URL']}/incrby/{key}/{count}"
+        safe_key = quote(clean_key, safe="")
+        url = f"{st.secrets['UPSTASH_URL']}/incrby/{safe_key}/{count}"
         headers = {"Authorization": f"Bearer {st.secrets['UPSTASH_TOKEN']}"}
         r = requests.get(url, headers=headers, timeout=5).json()
         return int(r.get("result", 0))
@@ -40,13 +52,13 @@ def increment_audits(key: str, count: int) -> int:
         return 0
 
 
-# License Key Validation
+# Lemon Squeezy License Validation (with product verification)
 def verify_lemon_license(license_key: str) -> tuple[bool, str]:
     key = license_key.strip()
     if not key:
         return False, "Please enter a license key."
-    if key == "ADMIN-TEST-PASS":
-        return True, "Admin bypass granted."
+    if not is_valid_key_format(key):
+        return False, "Invalid license key format."
 
     url = "https://api.lemonsqueezy.com/v1/licenses/validate"
     headers = {"Accept": "application/json"}
@@ -62,6 +74,13 @@ def verify_lemon_license(license_key: str) -> tuple[bool, str]:
         status = data.get("license_key", {}).get("status")
         if status not in ["active", "inactive"]:
             return False, f"License is {status}."
+
+        # Cross-store reuse protection
+        expected_product_id = st.secrets.get("LEMON_PRODUCT_ID")
+        if expected_product_id:
+            actual_product_id = str(data.get("meta", {}).get("product_id", ""))
+            if actual_product_id != str(expected_product_id):
+                return False, "This license key belongs to another product."
 
         return True, "License verified successfully."
     except Exception as e:
@@ -101,7 +120,7 @@ if not st.session_state.get("authenticated", False):
     )
     st.stop()
 
-# Sidebar Metric Placeholder
+# Sidebar Quota Counter
 current_key = st.session_state.get("license_key", "")
 used_count = get_audits_used(current_key)
 remaining = max(0, AUDIT_LIMIT - used_count)
@@ -117,8 +136,27 @@ urls_input = st.text_area(
     height=140,
 )
 
+
+def process_target(url: str) -> dict:
+    """Worker function for concurrent thread pool execution."""
+    audit_data = audit_website(url)
+    pitch = (
+        "N/A - Site unreachable"
+        if "Failed" in audit_data["status"] or "Skipped" in audit_data["status"]
+        else generate_pitch(audit_data)
+    )
+    return {
+        "URL": audit_data["url"],
+        "Title": audit_data["title"] or "N/A",
+        "Load Time (s)": audit_data["load_time_sec"] or "N/A",
+        "SSL Secure": "Yes" if audit_data["is_https"] else "No",
+        "Mobile Ready": "Yes" if audit_data["has_mobile_viewport"] else "No",
+        "Status": audit_data["status"],
+        "Generated Pitch": pitch,
+    }
+
+
 if st.button("Run Batch Audit", type="primary"):
-    # Normalize to lowercase and strip protocol/slashes for accurate deduplication
     seen = set()
     raw_urls = []
     for line in urls_input.splitlines():
@@ -141,37 +179,40 @@ if st.button("Run Batch Audit", type="primary"):
             f"Quota exceeded. You only have {remaining} audits remaining on your license."
         )
     else:
-        results = []
+        total_urls = len(raw_urls)
+        ordered_results = [None] * total_urls
         progress_bar = st.progress(0)
         status_text = st.empty()
 
-        for idx, url in enumerate(raw_urls):
-            status_text.text(f"Auditing {idx + 1}/{len(raw_urls)}: {url}")
-            audit_data = audit_website(url)
+        # Concurrent execution with 5 parallel workers
+        with ThreadPoolExecutor(max_workers=5) as executor:
+            future_to_idx = {
+                executor.submit(process_target, url): (idx, url)
+                for idx, url in enumerate(raw_urls)
+            }
+            completed = 0
+            for future in as_completed(future_to_idx):
+                idx, url = future_to_idx[future]
+                completed += 1
+                status_text.text(f"Processed {completed}/{total_urls}: {url}")
+                progress_bar.progress(completed / total_urls)
+                try:
+                    ordered_results[idx] = future.result()
+                except Exception as e:
+                    ordered_results[idx] = {
+                        "URL": url,
+                        "Title": "Error",
+                        "Load Time (s)": "N/A",
+                        "SSL Secure": "No",
+                        "Mobile Ready": "No",
+                        "Status": f"Failed: {e}",
+                        "Generated Pitch": "N/A - Internal execution error",
+                    }
 
-            pitch = (
-                "N/A - Site unreachable"
-                if "Failed" in audit_data["status"]
-                else generate_pitch(audit_data)
-            )
+        results = [r for r in ordered_results if r is not None]
 
-            results.append(
-                {
-                    "URL": audit_data["url"],
-                    "Title": audit_data["title"] or "N/A",
-                    "Load Time (s)": audit_data["load_time_sec"] or "N/A",
-                    "SSL Secure": "Yes" if audit_data["is_https"] else "No",
-                    "Mobile Ready": (
-                        "Yes" if audit_data["has_mobile_viewport"] else "No"
-                    ),
-                    "Status": audit_data["status"],
-                    "Generated Pitch": pitch,
-                }
-            )
-            progress_bar.progress((idx + 1) / len(raw_urls))
-
-        # Save to database and update state
-        new_total = increment_audits(current_key, len(raw_urls))
+        # Atomically increment database and update sidebar
+        new_total = increment_audits(current_key, len(results))
         new_remaining = max(0, AUDIT_LIMIT - new_total)
         quota_display.metric("Audits Remaining", f"{new_remaining} / {AUDIT_LIMIT}")
 
@@ -180,9 +221,16 @@ if st.button("Run Batch Audit", type="primary"):
 
         st.session_state["last_results"] = results
 
-# Display Persistent Results
+# Display Results & Controls
 if "last_results" in st.session_state:
-    st.subheader("Audit Results")
+    col_header, col_reset = st.columns([5, 1])
+    with col_header:
+        st.subheader("Audit Results")
+    with col_reset:
+        if st.button("Clear Results"):
+            del st.session_state["last_results"]
+            st.rerun()
+
     for idx, row in enumerate(st.session_state["last_results"]):
         with st.expander(f"{row['URL']} - {row['Status']}", expanded=True):
             c1, c2, c3 = st.columns(3)
