@@ -19,25 +19,29 @@ urls_input = st.text_area(
 )
 
 
-def verify_license_key(license_key):
-    if not license_key:
+def verify_lemon_license(license_key: str) -> tuple[bool, str]:
+    key = license_key.strip()
+    if not key:
         return False, "Please enter a license key."
 
-    # Bypass for admin/testing
-    if license_key == "ADMIN-TEST-PASS":
-        return True, "Admin bypass active"
+    if key == "ADMIN-TEST-PASS":
+        return True, "Admin bypass granted."
 
     url = "https://api.lemonsqueezy.com/v1/licenses/activate"
-    payload = {"license_key": license_key, "instance_name": "SiteScout Web User"}
+    payload = {
+        "license_key": key,
+        "instance_name": "Streamlit Client",
+    }
+    headers = {"Accept": "application/json"}
+
     try:
-        response = requests.post(url, data=payload, timeout=10)
+        response = requests.post(url, data=payload, headers=headers, timeout=10)
         data = response.json()
         if data.get("activated"):
-            return True, "License active"
-        else:
-            return False, data.get("error", "Invalid or inactive license key.")
-    except Exception:
-        return False, "License server unreachable."
+            return True, "License activated successfully."
+        return False, data.get("error", "Invalid license key.")
+    except Exception as e:
+        return False, f"Verification failed: {e}"
 
 
 # Sidebar Access Control
@@ -45,16 +49,19 @@ st.sidebar.title("Account")
 license_key = st.sidebar.text_input("Enter License Key", type="password")
 
 if st.sidebar.button("Verify License"):
-    valid, msg = verify_license_key(license_key)
+    valid, msg = verify_lemon_license(license_key)
     if valid:
         st.session_state["authenticated"] = True
-        st.sidebar.success("Access granted.")
+        st.sidebar.success(msg)
     else:
         st.session_state["authenticated"] = False
         st.sidebar.error(msg)
 
 if not st.session_state.get("authenticated", False):
     st.info("Please enter a valid license key in the sidebar to use SiteScout.")
+    st.markdown(
+        "[Get a License Key ($25)](https://sitescout-app.lemonsqueezy.com/checkout/buy/4bbf5eb6-c7d8-4a7f-bc76-8b0dd0bbae3b)"
+    )
     st.stop()
 
 
