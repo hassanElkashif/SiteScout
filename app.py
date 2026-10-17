@@ -22,7 +22,7 @@ def is_valid_key_format(key: str) -> bool:
     return bool(re.match(r"^[a-zA-Z0-9\-]{8,64}$", key.strip()))
 
 
-# Upstash Quota Tracking (with path sanitization)
+# Upstash Quota Tracking
 def get_audits_used(key: str) -> int:
     clean_key = key.strip()
     if not is_valid_key_format(clean_key):
@@ -52,35 +52,33 @@ def increment_audits(key: str, count: int) -> int:
         return 0
 
 
-# Lemon Squeezy License Validation (with product verification)
-def verify_lemon_license(license_key: str) -> tuple[bool, str]:
+# Gumroad License Validation
+def verify_gumroad_license(license_key: str) -> tuple[bool, str]:
     key = license_key.strip()
     if not key:
         return False, "Please enter a license key."
     if not is_valid_key_format(key):
         return False, "Invalid license key format."
 
-    url = "https://api.lemonsqueezy.com/v1/licenses/validate"
-    headers = {"Accept": "application/json"}
-    payload = {"license_key": key}
+    url = "https://api.gumroad.com/v2/licenses/verify"
+    payload = {
+        "product_id": st.secrets["GUMROAD_PRODUCT_ID"],
+        "license_key": key,
+        "increment_uses_count": "false",
+    }
 
     try:
-        response = requests.post(url, data=payload, headers=headers, timeout=10)
+        response = requests.post(url, data=payload, timeout=10)
         data = response.json()
 
-        if not data.get("valid"):
-            return False, data.get("error", "Invalid or inactive license key.")
+        if not data.get("success"):
+            return False, data.get(
+                "message", "Invalid or inactive license key."
+            )
 
-        status = data.get("license_key", {}).get("status")
-        if status not in ["active", "inactive"]:
-            return False, f"License is {status}."
-
-        # Cross-store reuse protection
-        expected_product_id = st.secrets.get("LEMON_PRODUCT_ID")
-        if expected_product_id:
-            actual_product_id = str(data.get("meta", {}).get("product_id", ""))
-            if actual_product_id != str(expected_product_id):
-                return False, "This license key belongs to another product."
+        purchase = data.get("purchase", {})
+        if purchase.get("refunded") or purchase.get("disputed"):
+            return False, "License key has been refunded or revoked."
 
         return True, "License verified successfully."
     except Exception as e:
@@ -94,14 +92,14 @@ input_key = st.sidebar.text_input("Enter License Key", type="password")
 # URL Query Param Auto-Login
 params = st.query_params
 if "key" in params and not st.session_state.get("authenticated", False):
-    valid, msg = verify_lemon_license(params["key"])
+    valid, msg = verify_gumroad_license(params["key"])
     if valid:
         st.session_state["authenticated"] = True
         st.session_state["license_key"] = params["key"].strip()
 
 # Manual Verification
 if st.sidebar.button("Verify License"):
-    valid, msg = verify_lemon_license(input_key)
+    valid, msg = verify_gumroad_license(input_key)
     if valid:
         st.session_state["authenticated"] = True
         st.session_state["license_key"] = input_key.strip()
