@@ -116,7 +116,7 @@ if st.sidebar.button("Verify License"):
 if not st.session_state.get("authenticated", False):
     st.info("Please enter a valid license key in the sidebar to use SiteScout.")
     st.markdown(
-        "[Get a License Key ($25)](https://sitescout-app.lemonsqueezy.com/checkout/buy/4bbf5eb6-c7d8-4a7f-bc76-8b0dd0bbae3b)"
+        "[Get a License Key ($25)](https://kashifhas32.gumroad.com/l/sitescout)"
     )
     st.stop()
 
