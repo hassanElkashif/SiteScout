@@ -138,18 +138,41 @@ urls_input = st.text_area(
 def process_target(url: str) -> dict:
     """Worker function for concurrent thread pool execution."""
     audit_data = audit_website(url)
-    pitch = (
-        "N/A - Site unreachable"
-        if "Failed" in audit_data["status"] or "Skipped" in audit_data["status"]
-        else generate_pitch(audit_data)
-    )
+    status = audit_data["status"]
+    issues = audit_data.get("issues", [])
+
+    if "Failed" in status or "Skipped" in status:
+        pitch = "N/A - Site unreachable"
+    elif status == "Strong Site - Skip":
+        pitch = "Strong Site - Skip"
+    else:
+        pitch = generate_pitch(audit_data)
+
+    copyright_year = audit_data.get("copyright_year")
+    if copyright_year is None:
+        copyright_display = "Not Found"
+    elif audit_data.get("is_outdated_copyright"):
+        copyright_display = f"{copyright_year} (Outdated)"
+    else:
+        copyright_display = str(copyright_year)
+
     return {
         "URL": audit_data["url"],
         "Title": audit_data["title"] or "N/A",
-        "Load Time (s)": audit_data["load_time_sec"] or "N/A",
+        "Status": status,
+        "Issues Count": len(issues),
+        "Issues Found": " | ".join(issues) if issues else "None",
+        "Load Time (s)": (
+            audit_data["load_time_sec"]
+            if audit_data["load_time_sec"] is not None
+            else "N/A"
+        ),
         "SSL Secure": "Yes" if audit_data["is_https"] else "No",
         "Mobile Ready": "Yes" if audit_data["has_mobile_viewport"] else "No",
-        "Status": audit_data["status"],
+        "Meta Description": "Yes" if audit_data["has_meta_description"] else "No",
+        "H1 Tag": "Yes" if audit_data["has_h1"] else "No",
+        "Contact Link": "Yes" if audit_data["has_contact_link"] else "No",
+        "Copyright Year": copyright_display,
         "Generated Pitch": pitch,
     }
 
@@ -200,10 +223,16 @@ if st.button("Run Batch Audit", type="primary"):
                     ordered_results[idx] = {
                         "URL": url,
                         "Title": "Error",
+                        "Status": f"Failed: {e}",
+                        "Issues Count": 0,
+                        "Issues Found": "None",
                         "Load Time (s)": "N/A",
                         "SSL Secure": "No",
                         "Mobile Ready": "No",
-                        "Status": f"Failed: {e}",
+                        "Meta Description": "No",
+                        "H1 Tag": "No",
+                        "Contact Link": "No",
+                        "Copyright Year": "N/A",
                         "Generated Pitch": "N/A - Internal execution error",
                     }
 
@@ -230,26 +259,56 @@ if "last_results" in st.session_state:
             st.rerun()
 
     for idx, row in enumerate(st.session_state["last_results"]):
-        with st.expander(f"{row['URL']} - {row['Status']}", expanded=True):
-            c1, c2, c3 = st.columns(3)
-            c1.metric("Load Time", f"{row['Load Time (s)']}")
-            c2.metric("SSL Secure", row["SSL Secure"])
-            c3.metric("Mobile Ready", row["Mobile Ready"])
-            st.text_area(
-                "Cold Pitch",
-                value=row["Generated Pitch"],
-                height=90,
-                key=f"pitch_{idx}_{row['URL']}",
+        is_lead = row["Status"].startswith("Lead Found")
+        with st.expander(f"{row['URL']} - {row['Status']}", expanded=is_lead):
+            r1 = st.columns(4)
+            load_val = (
+                f"{row['Load Time (s)']}s"
+                if row["Load Time (s)"] != "N/A"
+                else "N/A"
             )
+            r1[0].metric("Load Time", load_val)
+            r1[1].metric("SSL Secure", row["SSL Secure"])
+            r1[2].metric("Mobile Ready", row["Mobile Ready"])
+            r1[3].metric("Copyright", row["Copyright Year"])
+
+            r2 = st.columns(4)
+            r2[0].metric("Meta Description", row["Meta Description"])
+            r2[1].metric("H1 Tag", row["H1 Tag"])
+            r2[2].metric("Contact Link", row["Contact Link"])
+            r2[3].metric("Issues Found", row["Issues Count"])
+
+            if row["Status"] == "Strong Site - Skip":
+                st.success(
+                    "Strong Site - Skip: Passed all technical checks. Move on to weaker leads."
+                )
+            elif "Failed" in row["Status"] or "Skipped" in row["Status"]:
+                st.warning(row["Status"])
+            else:
+                st.markdown("**Detected Flaws:**")
+                for flaw in row["Issues Found"].split(" | "):
+                    st.markdown(f"- {flaw}")
+                st.text_area(
+                    "Cold Pitch",
+                    value=row["Generated Pitch"],
+                    height=95,
+                    key=f"pitch_{idx}_{row['URL']}",
+                )
 
     csv_buffer = io.StringIO()
     fieldnames = [
         "URL",
         "Title",
+        "Status",
+        "Issues Count",
+        "Issues Found",
         "Load Time (s)",
         "SSL Secure",
         "Mobile Ready",
-        "Status",
+        "Meta Description",
+        "H1 Tag",
+        "Contact Link",
+        "Copyright Year",
         "Generated Pitch",
     ]
     writer = csv.DictWriter(csv_buffer, fieldnames=fieldnames)
