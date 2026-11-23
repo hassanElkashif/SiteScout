@@ -31,6 +31,17 @@ BOOKING_DOMAINS = (
     "mindbodyonline.com",
 )
 
+CONTACT_PATH_KEYWORDS = (
+    "/contact",
+    "/book",
+    "/schedule",
+    "/appointment",
+    "/quote",
+    "/estimate",
+    "/consultation",
+    "/get-in-touch",
+)
+
 
 def is_safe_host(hostname: str) -> tuple[bool, str]:
     """Validates that a hostname resolves strictly to public, non-reserved IP addresses."""
@@ -50,7 +61,6 @@ def is_safe_host(hostname: str) -> tuple[bool, str]:
                 return False, f"Restricted IP address detected ({ip_str})"
         return True, ""
     except socket.gaierror:
-        # Hostname cannot be resolved; let requests handle connection failure
         return True, ""
     except Exception as e:
         return False, f"Hostname verification error: {e}"
@@ -119,6 +129,41 @@ def extract_copyright_year(soup: BeautifulSoup, current_year: int) -> int | None
     return None
 
 
+def has_contact_path(soup: BeautifulSoup) -> bool:
+    """Checks for clickable tel:/mailto:, booking links, contact page links, or real contact forms."""
+    for a in soup.find_all("a", href=True):
+        href = a["href"].strip().lower()
+        if href.startswith("tel:") or href.startswith("mailto:"):
+            return True
+        if any(domain in href for domain in BOOKING_DOMAINS):
+            return True
+        if any(keyword in href for keyword in CONTACT_PATH_KEYWORDS):
+            return True
+
+    for form in soup.find_all("form"):
+        role = str(form.get("role", "")).lower()
+        if role == "search":
+            continue
+        if form.find("textarea") or form.find(
+            "input", attrs={"type": re.compile(r"^tel$", re.I)}
+        ):
+            return True
+        form_meta = " ".join(
+            [
+                str(form.get("id", "")),
+                " ".join(form.get("class", []) or []),
+                str(form.get("action", "")),
+            ]
+        ).lower()
+        if any(
+            word in form_meta
+            for word in ("contact", "quote", "book", "lead", "inquiry")
+        ):
+            return True
+
+    return False
+
+
 def _fetch_html(url: str, headers: dict) -> tuple[str, float, str, int, str]:
     """Fetches a URL safely and returns (final_url, load_time_sec, content_type, status_code, html)."""
     start_time = time.time()
@@ -177,7 +222,6 @@ def audit_website(url: str) -> dict:
                 clean_input, headers
             )
         except requests.exceptions.SSLError:
-            # Fallback to HTTP so sites with missing/broken SSL can still be audited and pitched
             ssl_failed = True
             http_url = re.sub(r"^https://", "http://", clean_input, flags=re.IGNORECASE)
             parsed_http = urlparse(http_url)
@@ -192,7 +236,9 @@ def audit_website(url: str) -> dict:
 
         report["url"] = final_url
         report["load_time_sec"] = load_time
-        report["is_https"] = (not ssl_failed) and final_url.lower().startswith("https://")
+        report["is_https"] = (not ssl_failed) and final_url.lower().startswith(
+            "https://"
+        )
 
         if "text/html" not in content_type:
             report["status"] = "Skipped: Target is not an HTML page"
@@ -216,27 +262,18 @@ def audit_website(url: str) -> dict:
         )
 
         # 2. Meta description check
-        meta_desc = soup.find("meta", attrs={"name": re.compile(r"^description$", re.I)})
+        meta_desc = soup.find(
+            "meta", attrs={"name": re.compile(r"^description$", re.I)}
+        )
         report["has_meta_description"] = bool(
             meta_desc and meta_desc.get("content", "").strip()
         )
 
         # 3. H1 heading check
-        report["has_h1"] = any(
-            h1.get_text(strip=True) for h1 in soup.find_all("h1")
-        )
+        report["has_h1"] = any(h1.get_text(strip=True) for h1 in soup.find_all("h1"))
 
-        # 4. Clickable phone (tel:), email (mailto:), or booking link check
-        has_contact = False
-        for a in soup.find_all("a", href=True):
-            href = a["href"].strip().lower()
-            if href.startswith("tel:") or href.startswith("mailto:"):
-                has_contact = True
-                break
-            if any(domain in href for domain in BOOKING_DOMAINS):
-                has_contact = True
-                break
-        report["has_contact_link"] = has_contact
+        # 4. Contact / booking path check
+        report["has_contact_link"] = has_contact_path(soup)
 
         # 5. Outdated copyright year check (flags years <= current_year - 2)
         current_year = datetime.now().year
@@ -271,7 +308,7 @@ def audit_website(url: str) -> dict:
             issues.append("Missing main H1 heading tag (weakens local SEO)")
         if not report["has_contact_link"]:
             issues.append(
-                "No clickable phone (tel:), email (mailto:), or booking link"
+                "No clickable phone (tel:), email (mailto:), contact link, or booking form"
             )
 
         report["issues"] = issues
@@ -308,16 +345,12 @@ def generate_pitch(audit_data: dict) -> str:
     if status == "Strong Site - Skip" or not issues:
         return "Strong Site - Skip"
 
-    # Prioritize the top 2 most impactful verifiable flaws so the 3-sentence note stays sharp
     top_issues = issues[:2]
 
-    # Sanitize title to prevent prompt boundary breakout
     raw_title = str(audit_data.get("title") or "No title found")
     clean_title = re.sub(r"[\r\n\t]+", " ", raw_title).strip()
     clean_title = (
-        clean_title.replace("&", "&amp;")
-        .replace("<", "&lt;")
-        .replace(">", "&gt;")[:80]
+        clean_title.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")[:80]
     )
 
     system_prompt = (
