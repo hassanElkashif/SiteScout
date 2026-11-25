@@ -2,7 +2,7 @@ name: Keep SiteScout Awake
 
 on:
   schedule:
-    - cron: "0 */6 * * *"
+    - cron: "0 */4 * * *"
   workflow_dispatch:
 
 jobs:
@@ -22,19 +22,52 @@ jobs:
       - name: Visit and wake app
         run: |
           python - << 'EOF'
+          import re
+          import sys
           from playwright.sync_api import sync_playwright
+
+          URL = "https://sitescout.streamlit.app/"
+
+          def find_in_frames(page, selector, text_pattern=None):
+              for frame in page.frames:
+                  try:
+                      loc = frame.locator(selector, has_text=text_pattern) if text_pattern else frame.locator(selector)
+                      if loc.count() > 0:
+                          return loc.first
+                  except Exception:
+                      continue
+              return None
 
           with sync_playwright() as p:
               browser = p.chromium.launch(headless=True)
               page = browser.new_page()
-              page.goto("https://sitescout.streamlit.app/", wait_until="domcontentloaded", timeout=60000)
-              page.wait_for_timeout(8000)
-              wake_btn = page.get_by_role("button", name="Yes, get this app back up!")
-              if wake_btn.count() > 0:
-                  wake_btn.first.click()
-                  page.wait_for_timeout(45000)
-                  print("Clicked wake-up button.")
-              else:
-                  print("App is already awake.")
+              page.goto(URL, wait_until="domcontentloaded", timeout=60000)
+
+              woke = False
+              for _ in range(15):
+                  wake_btn = find_in_frames(page, "button", re.compile(r"get this app back up|wake", re.I))
+                  if wake_btn:
+                      wake_btn.click(force=True)
+                      print("Clicked wake-up button inside iframe.")
+                      woke = True
+                      break
+                  if find_in_frames(page, "[data-testid='stAppViewContainer']"):
+                      break
+                  page.wait_for_timeout(1500)
+
+              loaded = False
+              max_polls = 45 if woke else 15
+              for _ in range(max_polls):
+                  if find_in_frames(page, "[data-testid='stAppViewContainer']"):
+                      loaded = True
+                      break
+                  page.wait_for_timeout(2000)
+
               browser.close()
+
+              if not loaded:
+                  print("ERROR: App did not finish waking up within timeout.")
+                  sys.exit(1)
+
+              print("SUCCESS: SiteScout is awake and WebSocket session is active.")
           EOF
